@@ -13,14 +13,48 @@
 # ---
 
 # %% [markdown]
-# ## Some common abbreviations we'll be using
+# # Some common abbreviations we'll be using
 #  - GS: Group Stage
 #  - KO: Knockout Stage
 #  - LB: Leaderboard
 #  - XG: Expected Goals
 
 # %% [markdown]
-# ## Imports and Loading Data
+# # FIFA 2026 World Cup Simulation
+# ## The Plan
+#  - Start running the simulation (speed issue)
+#  - Introduce the tournament
+#  - Look at the code for a single simulation
+#  - How we are going to do the simulation
+#  - Run a random simulation demo
+#  - Predicting match outcomes
+#  - Creating the stats we'll need
+#  - Testing our xg model
+#  - Sampling with poisson distribution
+#  - Putting together our final model
+#  - Results analysis
+#
+# ## Let's understand the format before we go any further
+# ### There are 48 teams in 12 groups
+# ![Groups](resources/images/groups.jpg)
+# ### Top 2 from each group + top 8 3rd-place teams advance
+# ![Bracket](resources/images/bracket.jpg)
+# ### In total, there will be 104 matches
+# ![Matches](resources/images/matches.jpg)
+#
+# ## So what, it's only the World Cup!
+# ### We want to try and predict who will win
+#  - So we can gamble with more confidence
+#  - For Fun
+#
+# ### This problem is *ill-posed*
+#  - Tournaments are very random
+#  - We only have a limited amount of resources
+#  - The guy making it have a limited amout of brain...
+
+# %% [markdown]
+# # Getting Started
+# ## Imports, Utils
 
 # %%
 from enum import Enum
@@ -50,7 +84,6 @@ from scipy.stats import poisson, skellam, gaussian_kde
 from scipy.special import comb
 import sklearn
 
-# %%
 # A few utils
 class Object(dict):
     def __getattr__(self, key):
@@ -74,13 +107,11 @@ def pairify(iterable):
     it = iter(iterable)
     return list(zip(it, it))
 
-# import logging, sys
-# logging.basicConfig(
-    # stream=sys.stdout,
-    # level=logging.DEBUG,
-    # format='%(asctime)s %(threadName)s %(message)s'
-# )
+# Random number generator of choice
+random = np.random.default_rng()
 
+# %% [markdown]
+# ## Here is the data that helps us buil our World Cup Simulation
 
 # %%
 reference = Object()
@@ -124,11 +155,44 @@ reference.team_codes = load_json("resources/data/team_codes.json")
 # All matches
 reference.matches = load_str("resources/data/matches.json")
 
-# Random number generator of choice
-random = np.random.default_rng()
+# The Analyst Predictions
+reference.analyst_predicitons = pd.read_csv("resources/data/analyst_predictions.csv", index_col=0).drop(columns=['top_group'])
 
-# %%
-reference.group_stage_leaderboard
+# %% [markdown]
+# # The code backbone
+# This is an overview of the important classes used to run the simulation
+#
+# ## `Team`
+# Represents a team and holds their stats
+#  - `name`: The team's name
+#  - ...: Other stats (up to us to create)
+#
+# ## `Match`
+# Represents a single game
+#  - `home`: The home team
+#  - `away`: The away team
+#  - `winner`: The winning team (or 'draw')
+#  - `loser`: The losing team
+#  - `simulate()`: simulates the match
+#
+# ## `Tournament`
+# Represents an entire tournament
+#  - `simulate()`: simulates the entire tournament
+#  - `display_bracket()`: draw out the tournaments bracket (after simulation)
+#
+# ## `TournamentSimulator`
+# Used to run and analyze `n` tournaments
+#  - `simulate()`: simulates `n` tournaments
+#  - `summary`: a table with each team's outcomes
+#  - `avg_gs_lb`: an average of all the group stage leaderboards from every simulated tournament
+#
+# ## `Model`
+# Abstract class that represents a way of simulating match outcomes (we will talk about this later)
+#  - `feature_extractor()`
+#  - `xg_predictor()`
+#  - `goal_simulator()`
+#  - `penalty_simulator()`
+#  - `feature_updater()`
 
 # %%
 class UnknownTeam:
@@ -526,7 +590,7 @@ class TournamentSimulator:
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             for i in range(n):
                 futures.append(executor.submit(self._run_a_simulation, i))
-        
+
                 all_placements = []
                 for future in tqdm(as_completed(futures), total=n, desc='Simulating'):
                     all_placements.append(future.result())
@@ -585,11 +649,78 @@ class Model:
     def feature_updater(self, match: Match):
         raise NotImplementedError
 
+# Lookup table of team names to Team objects
+reference.teams = {
+    name: Team(name) for name in reference.wc_teams
+}
+
+# %% [markdown]
+# # Let's run a *super* deterministic tournament
+# ## Our model is simple: Larger FIFA Ranking always wins
+# ![Rankings](resources/images/rankings.png)
+#
+
+# %%
+# We define our model
+class RankIsEverything(Model):
+    # Getting team rankings
+    def feature_extractor(self, match: Match) -> tuple[dict, dict]:
+        return ({'team_ranking': reference.rankings.loc[match.home.name, 'points'],
+                 'opponent_ranking': reference.rankings.loc[match.away.name, 'points']},
+                {'team_ranking': reference.rankings.loc[match.away.name, 'points'],
+                 'opponent_ranking': reference.rankings.loc[match.home.name, 'points']})
+
+    # Calculate higher ranking
+    def xg_predictor(self, match_features: dict) -> float:
+        home_points = match_features["team_ranking"]
+        away_points = match_features["opponent_ranking"]
+        # TODO
+        if home_points > away_points:
+            return 1
+        else:
+            return 0
+
+    def goal_simulator(self, xg: float) -> int:
+        return int(xg)
+
+    def penalty_simulator(self, *args) -> str:
+        return 'home'
+
+    def feature_updater(self, match: Match):
+        pass
+
+# Create a tournament
+t = Tournament(
+    teams=reference.teams,
+    gs_lb=reference.group_stage_leaderboard,
+    matches=reference.matches
+)
+# Simulate with our model
+t.simulate(RankIsEverything)
+# Display the resulting bracket
+t.display_bracket()
+
+# %% [markdown]
+# # One simulation isn't enough
+# ## Monte-Carlo is the way to go
+# Gambling keeps coming up, maybe I should...
+#
+# ## We want to simulate thousands of tournaments
+#  - Result is a distribution, not a concrete outcome
+#    - Just because France might be favored in every matchup, doesn't mean they will win all of them
+#  - A team might be in a difficult group, but do well when they make knockout rounds
+#
+# # Let's run a (small) simulation
+# For fun, let's make every game tottaly random
+
+# %%
 class TotallyRandom(Model):
     def feature_extractor(self, match: Match) -> tuple[dict, dict]:
         return ({}, {})
 
+    # Pure random!
     def xg_predictor(self, match_features: dict) -> float:
+        # TODO
         return 6 * random.random()
 
     def goal_simulator(self, xg: float) -> int:
@@ -605,99 +736,126 @@ class TotallyRandom(Model):
     def feature_updater(self, match: Match):
         pass
 
-class RankIsEverything(Model):
-    def feature_extractor(self, match: Match) -> tuple[dict, dict]:
-        return ({'team_ranking': reference.rankings.loc[match.home.name, 'points'],
-                 'opponent_ranking': reference.rankings.loc[match.away.name, 'points']},
-                {'team_ranking': reference.rankings.loc[match.away.name, 'points'],
-                 'opponent_ranking': reference.rankings.loc[match.home.name, 'points']})
-
-    def xg_predictor(self, match_features: dict) -> float:
-        home_points = match_features["team_ranking"]
-        away_points = match_features["opponent_ranking"]
-        if home_points > away_points:
-            return 1
-        else:
-            return 0
-
-    def goal_simulator(self, xg: float) -> int:
-        return int(xg)
-
-    def penalty_simulator(self, *args) -> str:
-        return 'home' # doesnt matter, theres always a winner
-
-    def feature_updater(self, match: Match):
-        pass
-
-# %%
-# Lookup table of team names to Team objects
-reference.teams = {
-    name: Team(name) for name in reference.wc_teams
-}
-
-# %%
-start = timer()
-t = Tournament(
-    teams=reference.teams,
-    gs_lb=reference.group_stage_leaderboard,
-    matches=reference.matches
-)
-t.simulate(RankIsEverything)
-end = timer()
-print(end - start)
-
-# t.results
-t.display_bracket()
-
-# %%
-start = timer()
+# We will to 500 simulations with the random model
 s = TournamentSimulator(
-    num_simulations   = 100,
+    num_simulations   = 500, # TODO
+    model             = TotallyRandom,
     teams             = reference.teams,
     gs_lb             = reference.group_stage_leaderboard,
     matches           = reference.matches,
-    model             = TotallyRandom
 )
+# Run the simulations
 s.simulate()
-end = timer()
-print(end - start)
+# Display the results
 s.summary
 
-# %%
-data = Object()
-path = kagglehub.dataset_download("martj42/international-football-results-from-1872-to-2017")
-data.results = pd.read_csv(os.path.join(path, "results.csv"))
-data.goalscorers = pd.read_csv(os.path.join(path, "goalscorers.csv"))
-data.shootouts = pd.read_csv(os.path.join(path, "shootouts.csv"))
-path = kagglehub.dataset_download("cashncarry/fifaworldranking")
-data.ranking_history = pd.read_csv(os.path.join(path, "fifa_ranking-2024-06-20.csv"))
-data.rankings = pd.read_csv("resources/data/fifa_rankings.csv", index_col=0)
+# %% [markdown]
+# # So how will we actually simulate matches?
+
+# %% [markdown]
+# ## Given two teams, how can we simulate many matches?
+#
+# ### Example: France vs Spain
+# If they play each other today, the outcome might be 1-0 \
+# If they then play tomorrow, the outcome might be 1-2 \
+# If they play again the next day, the outcome might be 3-3
+#
+# ## Key #1: Even between the same two teams with the same stats, outcomes should vary
+# This means there should be randomness \
+# Or maybe the unknown factor is the players' breakfasts, but we don't have that data, unfortunately
+
+# %% [markdown]
+# ## Our randomness should follow some pattern
+#
+# ### Example: England vs American Samoa
+# Why American Samoa? 1) It's small 2) I'm craving girl scout cookies... \
+# We would predict England scoring a **lot**, and American Samoa hardly ever scoring \
+# There might be a world were England draws or even loses due to some supernatural events, but it would be *very* rare
+#
+# ## Key #2: The best we can do is xG (expected goals)
+# Maybe not *the* best, but close enough \
+# xG meassures how many goals we *expect* a team to score \
+# They may or may not score exactly that many goals, that's were our randomness comes it
+#
+
+# %% [markdown]
+# # The Pipeline
+# ```
+#  ______        _______        ____         _______
+# | Team | ---> | Stats | ---> | xG |  ---> | goals |
+#  ‾‾‾‾‾‾        ‾‾‾‾‾‾‾        ‾‾‾‾         ‾‾‾‾‾‾‾
+# ```
+#
+# ## Teams
+# We start with two teams. What about them?
+#
+# ## We want stats `model.feature_extractor`
+# I scream, you scream, we all scream for betting!?
+# Well how else would we predict xG? Vibes? Jerseys?
+#
+# ## Put the stats to use `model.xg_predictor`
+# We use them to calculate xG
+# How? Regression!
+#
+# ## We sample `model.goal_simulator`
+# Giving us a concrete score
+#
+# ## What about OT? `model.penalty_simulator`
+# In case we need a winner
+#
+# ## Results
+#
+
+# %% [markdown]
+# # Calculating stats
+# ## Let's look at the data we'll be using
+# ### `results.csv`
+# International soccer matches since 1872!
+#
 
 # %%
-data.results = data.results.dropna().reset_index(drop=True)
-# Keeping only results from 1970 because modern (TODO explain)
-data.results = data.results[data.results['date'] > '1970-01-01'].reset_index(drop=True)
+# kaggle is down
+results = pd.read_csv("resources/data/results.csv")
+
+# %% [markdown]
+# ## What's in `results`?
+
+# %%
+results
+
+# %% [markdown]
+# ## Let's filter out old games
+
+# %%
+results = results.dropna().reset_index(drop=True)
+# Keeping only results from 1970 because modern
+results = results[results['date'] > '1970-01-01'].reset_index(drop=True)
 
 # %%
 # we count every time a team has played at home and away
-home_games_played = data.results['home_team'].value_counts()
-away_games_played = data.results['away_team'].value_counts()
+# home_games_played = results['home_team'].value_counts()
+# away_games_played = results['away_team'].value_counts()
 
 # we each teams' total games played by combining home and away games played
-games_played = pd.concat([home_games_played, away_games_played]).groupby(level=0).sum()
+# games_played = pd.concat([home_games_played, away_games_played]).groupby(level=0).sum()
 
 # now we add it back into the results
-data.results['home_team_games_played'] = data.results['home_team'].apply(lambda t: games_played[t])
-data.results['away_team_games_played'] = data.results['away_team'].apply(lambda t: games_played[t])
+# results['home_team_games_played'] = results['home_team'].apply(lambda t: games_played[t])
+# results['away_team_games_played'] = results['away_team'].apply(lambda t: games_played[t])
 
 # keep only teams with 200 games played in past 45 years (5 games/year)
 # and fricking Curaçao has only player 215 since 1970
-data.results = data.results[
-    (data.results['home_team_games_played'] > 200) &
-    (data.results['away_team_games_played'] > 20)
-].reset_index(drop=True)
+# results = results[
+    # (results['home_team_games_played'] > 200) &
+    # (results['away_team_games_played'] > 20)
+# ].reset_index(drop=True)
+
+# %% [markdown]
+# ## Our first new stat: Importance
+# We want the World Cup to carry more importance than friendlies
 
 # %%
+# Categories
 confedrational_tournaments = ['UEFA Euro', 'African Cup of Nations', 'AFC Asian Cup', 'CONCACAF Championship',
                               'Copa América', 'Gold Cup','Oceania Nations Cup', 'Confederations Cup']
 
@@ -722,8 +880,10 @@ for t in nations_league:
 
 tournament_categories['FIFA World Cup'] = 'FIFA World Cup'
 
-data.results['category'] = data.results.tournament.apply(lambda x: tournament_categories[x])
+results['category'] = results.tournament.apply(lambda x: tournament_categories[x])
 
+# Our (semi-arbitrary) importances
+# Chose your own!
 importances = {
     'FIFA World Cup': 1.0,
     'Confederational Tournament': 0.85,
@@ -731,38 +891,88 @@ importances = {
     'Friendlies/Low-Importance Competitions': 0.5,
 }
 
-data.results['importance'] = data.results.category.apply(lambda x: importances[x])
+results['importance'] = results.category.apply(lambda x: importances[x])
+
+# %% [markdown]
+# # Let's get serious
+#
+# ## What stats will we use to predict xG?
+#
+# ### Elo Ranking
+# Like the official FIFA ranking, but calculated ourselfs
+# $$
+# R_{new} = R_{old} + \alpha i (W - W_e)
+# $$
+#  - $R$ is the rating/ranking whatever you want to call it
+#  - $\alpha$ is some scalar
+#  - $W$ is the actual outcome
+#  - $W_e$ is predicted ouctome based off the two teams rankings
+#
+# ### Attack Strength Indicator
+# Exactly what it sounds like
+# Measures a team's recent offense
+# $$
+# A_{new} = \mu g + (1−\mu)A_{old}
+# $$
+#  - $A$ is the attack strength indicator
+#  - $\mu$ is a factor based on the opposents defense indicator
+#  - $g$ is the number of goals scored by the team
+#
+# ### Defense Weakness Indicator
+# Exactly what it sounds like
+# Measures a team's recent defense
+# $$
+# D_{new} = \mu g + (1−\mu)D_{old}
+# $$
+#  - $A$ is the defense weakness indicator
+#  - $\mu$ is a factor based on the opposents attack indicator
+#  - $g$ is the number of goals conceded by the team
+#
+# ### Form
+# Created by yours truly
+# Measures a team's preformance in their last 5 games
+# $$
+# F = \sum^{5}_{k=1}{d_ki_kc_k}
+# $$
+#  - $F$ is the form
+#  - $d$ is the goal difference from a match
+#  - $i$ is the match importance
+#  - $c$ is difference of the teams rating (and completes my initials)
+#
 
 # %%
-# frickin Bermuda doesn't play at home
 all_teams = list(
-    set(data.results['home_team'].unique()) |
-    set(data.results['away_team'].unique())
+    set(results['home_team'].unique()) |
+    set(results['away_team'].unique())
 )
 num_all_teams = len(all_teams)
 ratings = {name: 0.0 for name in all_teams}
 asi = {name: 0.0 for name in all_teams}
 dwi = {name: 0.0 for name in all_teams}
 form = {name: np.zeros(shape=(5, 3)) for name in all_teams}
-data.results['home_rating'] = None
-data.results['home_asi'] = None
-data.results['home_dwi'] = None
-data.results['home_form'] = None
-data.results['away_rating'] = None
-data.results['away_asi'] = None
-data.results['away_form'] = None
+results['home_rating'] = None
+results['home_asi'] = None
+results['home_dwi'] = None
+results['home_form'] = None
+results['away_rating'] = None
+results['away_asi'] = None
+results['away_form'] = None
 
 matches_played = {name: 0 for name in all_teams}
 teams_at_5_games_played = 0
 all_teams_5_games_index = -1
 
-def calculate_new_rating(match):
+def calculate_new_rating(match, t1=None, t2=None):
     team1 = match['home_team']
     team2 = match['away_team']
 
     # ratings
-    r1 = ratings[team1]
-    r2 = ratings[team2]
+    if t1 is None:
+        r1 = ratings[team1]
+        r2 = ratings[team2]
+    else:
+        r1 = t1.rating
+        r2 = t2.rating
 
     # scores
     g1 = match['home_score']
@@ -792,15 +1002,21 @@ def calculate_new_rating(match):
     # update the latest rating
     return r1, r2
 
-def calculate_new_asi(match):
-    t1 = match['home_team']
-    t2 = match['away_team']
+def calculate_new_asi(match, t1=None, t2=None):
+    team1 = match['home_team']
+    team2 = match['away_team']
 
-    asi1 = asi[t1]
-    asi2 = asi[t2]
+    if t1 is None:
+        asi1 = asi[team1]
+        asi2 = asi[team2]
 
-    dwi1 = dwi[t1]
-    dwi2 = dwi[t2]
+        dwi1 = dwi[team1]
+        dwi2 = dwi[team2]
+    else:
+        as1 = t1.asi
+        as2 = t2.asi
+        as1 = t1.dwi
+        as2 = t2.dwi
 
     g1 = match['home_score']
     g2 = match['away_score']
@@ -819,15 +1035,21 @@ def calculate_new_asi(match):
 
     return asi1, asi2
 
-def calculate_new_dwi(match):
-    t1 = match['home_team']
-    t2 = match['away_team']
+def calculate_new_dwi(match, t1=None, t2=None):
+    team1 = match['home_team']
+    team2 = match['away_team']
 
-    asi1 = asi[t1]
-    asi2 = asi[t2]
+    if t1 is None:
+        asi1 = asi[team1]
+        asi2 = asi[team2]
 
-    dwi1 = dwi[t1]
-    dwi2 = dwi[t2]
+        dwi1 = dwi[team1]
+        dwi2 = dwi[team2]
+    else:
+        as1 = t1.asi
+        as2 = t2.asi
+        as1 = t1.dwi
+        as2 = t2.dwi
 
     g1 = match['home_score']
     g2 = match['away_score']
@@ -841,17 +1063,21 @@ def calculate_new_dwi(match):
     u1 = a * i * (1.5 - sig1)
     u2 = a * i * (1.5 - sig2)
 
-    dwi1 = u1 * g1 + (1 - u1) * dwi1
-    dwi2 = u2 * g2 + (1 - u2) * dwi2
+    dwi1 = u1 * g2 + (1 - u1) * dwi1
+    dwi2 = u2 * g1 + (1 - u2) * dwi2
 
     return dwi1, dwi2
 
-def calculate_new_form(match):
-    t1 = match['home_team']
-    t2 = match['away_team']
+def calculate_new_form(match, t1=None, t2=None):
+    team1 = match['home_team']
+    team2 = match['away_team']
 
-    f1 = form[t1]
-    f2 = form[t2]
+    if t1 is None:
+        f1 = form[team1]
+        f2 = form[team2]
+    else:
+        f1 = t1.form
+        f2 = t2.form
 
     f1 = np.roll(f1, 3)
     f2 = np.roll(f2, 3)
@@ -875,12 +1101,12 @@ def calculate_new_form(match):
     return f1, f2
 
 def eval_form(f):
-    return float(sum([gd * i * rd for gd, i, rd in f]))
+    return 0.1 * float(sum([gd * i * rd for gd, i, rd in f]))
 
 def as_is(x):
     return x
 
-for i, row in tqdm(data.results.iterrows(), total=data.results.shape[0], desc='Calculating ratings'):
+for i, row in tqdm(results.iterrows(), total=results.shape[0], desc='Calculating ratings'):
     home = row['home_team']
     away = row['away_team']
 
@@ -895,9 +1121,9 @@ for i, row in tqdm(data.results.iterrows(), total=data.results.shape[0], desc='C
         home_stat = table[home]
         away_stat = table[away]
 
-        data.results.loc[i, 'home_'+col_name] = evaluator(home_stat)
+        results.loc[i, 'home_'+col_name] = evaluator(home_stat)
         row['home_'+col_name] = evaluator(home_stat)
-        data.results.loc[i, 'away_'+col_name] = evaluator(away_stat)
+        results.loc[i, 'away_'+col_name] = evaluator(away_stat)
         row['away_'+col_name] = evaluator(away_stat)
 
         # update the stat
@@ -915,7 +1141,7 @@ for i, row in tqdm(data.results.iterrows(), total=data.results.shape[0], desc='C
        and all_teams_5_games_index == -1:
         all_teams_5_games_index = i
 
-# %%
+# We add the stats to each team object
 for team in reference.wc_teams:
     reference.teams[team].rating = ratings[team]
     reference.teams[team].asi = asi[team]
@@ -923,11 +1149,17 @@ for team in reference.wc_teams:
     reference.teams[team].form = form[team]
 
 # %%
-relevant_results = data.results[data.results.index > all_teams_5_games_index].reset_index(drop=True)
-relevant_results
+# relevant_results = results[results.index > all_teams_5_games_index].reset_index(drop=True)
+# relevant_results
 
+# %% [markdown]
+# # Now we create our dataset
+# ## We'll train a machine-learning model on it
+# Regressors, but ML sounds cooler
+
+# %%
 entries = []
-for i, row in tqdm(relevant_results.iterrows(), total=relevant_results.shape[0], desc='Creating training data'):
+for i, row in tqdm(results.iterrows(), total=relevant_results.shape[0], desc='Creating training data'):
     date = row['date']
     team1 = row['home_team']
     team2 = row['away_team']
@@ -942,7 +1174,7 @@ for i, row in tqdm(relevant_results.iterrows(), total=relevant_results.shape[0],
     f1 = row['home_form']
     f2 = row['away_form']
     i = row['importance']
-    venue = 0 if row['neutral'] else 2int(team1 == row['country'])
+    venue = 0 if row['neutral'] else int(team1 == row['country'])
 
     # trying predict how many goals team1 scored
     entries.append({
@@ -976,7 +1208,10 @@ for i, row in tqdm(relevant_results.iterrows(), total=relevant_results.shape[0],
         'goals_scored': team2_score
     })
 
-data.entries = pd.DataFrame(entries)
+entries = pd.DataFrame(entries).dropna()
+
+# %% [markdown]
+# # We need some code to test our regressors, ignore it
 
 # %%
 def mean_log_likelihood(goals, lambdas):
@@ -1062,7 +1297,6 @@ def plot_pit_histogram(pit_values, bins=10):
     plt.show()
 pit = probability_integral_transform
 
-# %%
 class ModelValidator:
     def __init__(self, xg_predictor_callable, data, goals, goal_generator_callable=None, fixed_lambdas=None, window_length=2000):
         self.build_xg_predictor = xg_predictor_callable
@@ -1188,7 +1422,7 @@ class ModelValidator:
 
 
         for i in range(n_windows - 1):
-            print(f'\n({i + 1})')
+            # print(f'\n({i + 1})')
             train_data = data[: (i + 1) * self.WINDOW_LENGTH]
             train_goals = goals[: (i + 1) * self.WINDOW_LENGTH]
 
@@ -1200,12 +1434,12 @@ class ModelValidator:
             before = time()
             xg_predictor.fit(train_data, train_goals)
             summary['training-times'].append(time() - before)
-            print(f"xG Predictor training time: {summary['training-times'][-1]:.4f}")
+            # print(f"xG Predictor training time: {summary['training-times'][-1]:.4f}")
 
             before = time()
             lambdas = xg_predictor.predict(test_data)
             summary['inference-times'].append(time() - before)
-            print(f"xG Predictor inference time: {summary['inference-times'][-1]:.4f}")
+            # print(f"xG Predictor inference time: {summary['inference-times'][-1]:.4f}")
 
             if self.build_goal_generator is None:
                 # goal generator is not provided
@@ -1215,95 +1449,12 @@ class ModelValidator:
                 summary['neces'].append(eval_dict['nece'])
                 summary['nll1x2'].append(eval_dict['nll1x2'])
                 summary['pits'].append(eval_dict['pit'])
-                print(f"xG Predictor Mean Log Likelihood: {summary['mlls'][-1]:.4f}")
-                print(f"xG Predictor Negative Log-Loss 1X2: {summary['nll1x2'][-1]:.4f}")
-                print(f"xG Predictor Negative Expected Calibration Error: {summary['neces'][-1]:.4f}")
-
+                # print(f"xG Predictor Mean Log Likelihood: {summary['mlls'][-1]:.4f}")
+                # print(f"xG Predictor Negative Log-Loss 1X2: {summary['nll1x2'][-1]:.4f}")
+                # print(f"xG Predictor Negative Expected Calibration Error: {summary['neces'][-1]:.4f}")
             else:
-                # our goal is to evaluate goal generator
-                goal_generator = self.build_goal_generator()
-                train_lambdas = self.fixed_lambdas[(i + 1) * self.WINDOW_LENGTH: min(N, (i + 2) * self.WINDOW_LENGTH)]
-                train_lambdas_in_pairs = pairify(train_lambdas)
-                train_scores = pairify(train_goals)
-                before = time()
-                goal_generator.fit(train_lambdas_in_pairs, train_scores)
-                summary['gg-training-times'].append(time() - before)
-                print(f"Goal Generator training time: {summary['gg-training-times'][-1]:.4f}")
-                lambdas_in_pairs = pairify(lambdas)
-                before = time()
-                preds = goal_generator.predict(lambdas_in_pairs)
-                summary['gg-inference-times'].append(time() - before)
-                print(f"Goal Generator inference time: {summary['gg-inference-times'][-1]:.4f}")
-                test_scores = pairify(test_goals)
-                eval_dict = self.evaluate_goal_generator(test_scores, preds)
-                summary['hits'].append(eval_dict['hits'])
-                summary['1X2'].append(eval_dict['1X2'])
-                summary['nmse'].append(eval_dict['nmse'])
-                summary['gambler'].append(eval_dict['gambler'])
-                summary['nw2d'].append(eval_dict['nw2d'])
-                summary['scores-analysis'].append(eval_dict['scores-analysis'])
-                summary['preds-analysis'].append(eval_dict['preds-analysis'])
-                print(f"Goal Generator Hits Ratio: {summary['hits'][-1]:.4f}")
-                print(f"Goal Generator 1X2 Success Ratio: {summary['1X2'][-1]:.4f}")
-                print(f"Goal Generator Negative Mean Squared Error: {summary['nmse'][-1]:.4f}")
-                print(f"Goal Generator Gambler Rating: {summary['gambler'][-1]:.4f}")
-                print(f"Goal Generator Negative Wasserstein 2D: {summary['nw2d'][-1]:.4f}")
+                pass
 
-
-# %%
-maher_features = ['team_asi', 'opponent_dwi', 'venue']
-most_features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance']#, 'venue']
-all_features = ['team_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance']#, 'venue']
-
-summaries = Object()
-# 'Dummy Regressor': dr_summary,
-# 'Maher Model': mm_summary,
-# 'Poisson Regressor': pr_summary,
-# 'Poisson XGBRegressor Maher': pxgbr_maher_summary,
-# 'Poisson XGBRegressor': pxgbr_summary,
-
-# %%
-validator = ModelValidator(DummyRegressor, data.entries[features], data.entries['goals_scored'])
-validator.validate()
-summaries['Dummy Regressor'] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-# %%
-validator = ModelValidator(PoissonRegressor, data.entries[for_maher], data.entries['goals_scored'])
-validator.validate()
-summaries['Maher Model'] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-# %%
-validator = ModelValidator(PoissonRegressor, data.entries[all_features], data.entries['goals_scored'])
-validator.validate()
-summaries['Poisson Regressor All'] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-
-# %%
-validator = ModelValidator(PoissonRegressor, data.entries[most_features], data.entries['goals_scored'])
-validator.validate()
-summaries['Poisson Regressor Most'] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-# %%
-PoissonXGBR = lambda: XGBRegressor(objective='count:poisson', eval_metric='poisson-nloglik',
-                                   n_estimators=100, learning_rate=0.1)
-validator = ModelValidator(PoissonXGBR, data.entries[for_maher], data.entries['goals_scored'])
-validator.validate()
-summaries["PXGBR Maher"] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-# %%
-PoissonXGBR = lambda: XGBRegressor(objective='count:poisson', eval_metric='poisson-nloglik',
-                                   n_estimators=100, learning_rate=0.1)
-validator = ModelValidator(PoissonXGBR, data.entries[all_features], data.entries['goals_scored'])
-validator.validate()
-summaries["PXGBR All"] = validator.get_summary()
-validator.plot_xg_predictor_summary()
-
-# %%
 def plot_model_comparison(summaries):
     fig = plt.figure(figsize=(18, 12))
     fig.suptitle("xG Predictor Model Comparison", fontsize=18)
@@ -1387,10 +1538,6 @@ def plot_model_comparison(summaries):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 
-
-plot_model_comparison(summaries)
-
-# %%
 def analyze_pxgbr(data, goals, dates, window_length=2000):
     N = len(data)
     n_windows = N // window_length + 1
@@ -1405,8 +1552,8 @@ def analyze_pxgbr(data, goals, dates, window_length=2000):
         test_goals = goals[(i + 1) * window_length: min(N, (i + 2) * window_length)]
         first_date = dates[(i + 1) * window_length]
 
-        print(f'Window ({i + 1}) - {first_date}')
-        
+        # print(f'Window ({i + 1}) - {first_date}')
+
         pxgbr = PoissonXGBR()
         pxgbr.fit(train_data, train_goals)
         test_lambdas = pxgbr.predict(test_data)
@@ -1421,13 +1568,7 @@ def analyze_pxgbr(data, goals, dates, window_length=2000):
 
     return lambdas, importances
 
-xgs, importances = analyze_pxgbr(data.entries[all_features], data.entries['goals_scored'], data.entries['date'])
-
-# %%
-def plot_feature_importance_trends(names, feature_dicts):
-    # Extract features
-    features = ['team_rating', 'opponent_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance', 'venue']
-
+def plot_feature_importance_trends(names, feature_dicts, eatures):
     # Build a list of values per feature
     feature_values = {f: [] for f in features}
     for fd in feature_dicts:
@@ -1450,17 +1591,87 @@ def plot_feature_importance_trends(names, feature_dicts):
     plt.tight_layout()
     plt.show()
 
-
-data.entries['xg'] = xgs
-model = PoissonXGBR()
-model.fit(data.entries[all_features], data.entries['goals_scored'])
-model.predict(data.entries[all_features])
-d = {c: i for c, i in zip(features, model.feature_importances_)}
-plot_feature_importance_trends(range(1,len(importances) + 2), importances + [d])
-
+# %% [markdown]
+# # Our regressor models to predict xG
+# Maher model says
+# $$
+# log(\lambda) = A - D + H
+# $$
+#  - $A$ is attack strength indicator
+#  - $D$ is defesnse weakness indicator
+#  - $H$ is home field advantage
+#
+# Our regression models generally do
+# $$
+# log(\lambda) = \sum^{n}_{k=0}{W_if_i}
+# $$
+#  - $W$ is the unkown weight
+#  - $f$ is the stat/feature
+# and the outputs fit a poisson distribution (soon)
 
 # %%
-ha = data.results.copy()
+maher_features = ['team_asi', 'opponent_dwi', 'venue']
+most_features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance']#, 'venue']
+all_features = ['team_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance']#, 'venue']
+
+summaries = Object()
+
+validator = ModelValidator(DummyRegressor, entries[all_features], entries['goals_scored'])
+validator.validate()
+summaries['Dummy Regressor'] = validator.get_summary()
+validator.plot_xg_predictor_summary()
+
+validator = ModelValidator(PoissonRegressor, entries[maher_features], entries['goals_scored'])
+validator.validate()
+summaries['Maher Model'] = validator.get_summary()
+validator.plot_xg_predictor_summary()
+
+PoissonXGBR = lambda: XGBRegressor(objective='count:poisson', eval_metric='poisson-nloglik',
+                                   n_estimators=100, learning_rate=0.1)
+validator = ModelValidator(PoissonXGBR, entries[maher_features], entries['goals_scored'])
+validator.validate()
+summaries["PXGBR Maher"] = validator.get_summary()
+validator.plot_xg_predictor_summary()
+
+PoissonXGBR = lambda: XGBRegressor(objective='count:poisson', eval_metric='poisson-nloglik',
+                                   n_estimators=100, learning_rate=0.1)
+validator = ModelValidator(PoissonXGBR, entries[all_features], entries['goals_scored'])
+validator.validate()
+summaries["PXGBR All"] = validator.get_summary()
+validator.plot_xg_predictor_summary()
+
+plot_model_comparison(summaries)
+
+# %% [markdown]
+# # What features matter?
+# according to our model, don't quote me
+
+# %%
+xgs, importances = analyze_pxgbr(entries[all_features], entries['goals_scored'], entries['date'])
+
+entries['xg'] = xgs
+model = PoissonXGBR()
+used_features = all_features
+model.fit(entries[used_features], entries['goals_scored'])
+model.predict(entries[used_features])
+d = {c: i for c, i in zip(used_features, model.feature_importances_)}
+plot_feature_importance_trends(range(1,len(importances) + 2), importances + [d], used_features)
+
+# %% [markdown]
+# # The poisson distribution
+# It's not venem!
+#
+# ## What is does
+# It's a distribution showing how many goals are expected to be scored, given an average amount of goals scored
+#  - avg home goals = 1.79
+#  - avg away goals = 1.11
+#
+# ## We want to sample it
+# Thankfully, the math is alreay tucked away in a library!
+# We use this to simulate goals score from xG
+
+# %%
+ha = results.copy()
 ha = ha[ha['neutral'] == False]
 ha = ha[['home_score', 'away_score']]
 
@@ -1483,9 +1694,14 @@ plt.ylabel("Proportion of Matches",size=13)
 plt.title("Number of Goals per Match",size=14,fontweight='bold')
 plt.show()
 
+# %% [markdown]
+# # Putting it all together
+# Please tell my simulation has finished
+
 # %%
 class XGBR_Poisson(Model):
     pxgbr = None
+    features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance', 'team_form', 'opponent_form']
     def __init__(self):
         self.xg_model = deepcopy(XGBR_Poisson.pxgbr)
 
@@ -1494,9 +1710,9 @@ class XGBR_Poisson(Model):
             'team_rating': match.home.rating,
             'team_asi': match.home.asi,
             'opponent_dwi': match.away.dwi,
+            'importance': 1,
             'team_form': eval_form(match.home.form),
             'opponent_form': eval_form(match.away.form),
-            'importance': 1,
             # 'venue': 0.5, # not taking into account usa,mex,can
         }
 
@@ -1504,9 +1720,9 @@ class XGBR_Poisson(Model):
             'team_rating': match.away.rating,
             'team_asi': match.away.asi,
             'opponent_dwi': match.home.dwi,
+            'importance': 1,
             'team_form': eval_form(match.away.form),
             'opponent_form': eval_form(match.home.form),
-            'importance': 1,
 #            'venue': 0.5, # not taking into account usa,mex,can
         }
 
@@ -1529,27 +1745,35 @@ class XGBR_Poisson(Model):
             return 'away'
 
     def feature_updater(self, match: Match):
-        df = pd.DataFame([{
+        match_df = pd.DataFrame([{
             'home_team': match.home.name,
             'away_team': match.away.name,
             'away_rating': match.away.rating,
             'home_rating': match.home.rating,
-            ...
+            'away_asi': match.away.asi,
+            'home_asi': match.home.asi,
+            'away_dwi': match.away.dwi,
+            'home_dwi': match.home.dwi,
+            'away_form': match.away.form,
+            'home_form': match.home.form,
+            'importance': 1,
         }])
-        # TODO apply calculators
-        # update global dicts ?OR? individual teams
+        match.home.rating, match.away.rating = calculate_new_rating(match_df, match.home, match.away)
+        match.home.asi, match.away.asi = calculate_new_asi(match_df, match.home, match.away)
+        match.home.dwi, match.away.dwi = calculate_new_dwi(match_df, match.home, match.away)
+        match.home.form, match.away.form = calculate_new_form(match_df, match.home, match.away)
+        ratings
 
 start = timer()
 XGBR_Poisson.pxgbr = PoissonXGBR()
-# features = ['team_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance', 'venue']
-XGBR_Poisson.pxgbr.fit(data.entries[all_features], data.entries['goals_scored'])
+XGBR_Poisson.pxgbr.fit(entries[XGBR_Poisson.features], entries['goals_scored'])
 end = timer()
 print(end - start)
 
 # %%
 start = timer()
 s = TournamentSimulator(
-    num_simulations   = 100,
+    num_simulations   = 300,
     teams             = reference.teams,
     gs_lb             = reference.group_stage_leaderboard,
     matches           = reference.matches,
@@ -1558,7 +1782,23 @@ s = TournamentSimulator(
 )
 s.simulate()
 end = timer()
-print(end - start)
-s.summary
+print("TIME: ", end - start)
+display(s.summary)
+display(s.avg_gs_lb)
+# 1000 -> 548s ~ 9min
+
+# %% [markdown]
+# # Let's analyze
 
 # %%
+s.summary.sort_index()
+
+# %%
+# The Analyst's predicitons
+preds = reference.analyst_predicitons.copy()
+difference = s.summary.sort_index() - preds.sort_index()
+difference.sort_values(by='Win', key=abs, ascending=False)
+
+# %%
+error = difference / preds.sort_index()
+error.sort_values(by='Win', key=abs, ascending=False)

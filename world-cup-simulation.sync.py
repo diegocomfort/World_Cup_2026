@@ -57,6 +57,9 @@
 # ## Imports, Utils
 
 # %%
+# !git clone https://github.com/diegocomfort/World_Cup_2026.git
+# !mv World_Cup_2026/* ./
+
 from enum import Enum
 from copy import copy, deepcopy
 from collections.abc import Callable

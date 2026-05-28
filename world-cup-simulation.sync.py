@@ -736,9 +736,9 @@ class TotallyRandom(Model):
     def feature_updater(self, match: Match):
         pass
 
-# We will to 500 simulations with the random model
+# We will to a few simulations with the random model
 s = TournamentSimulator(
-    num_simulations   = 500, # TODO
+    num_simulations   = 111, # TODO
     model             = TotallyRandom,
     teams             = reference.teams,
     gs_lb             = reference.group_stage_leaderboard,
@@ -830,25 +830,6 @@ results
 results = results.dropna().reset_index(drop=True)
 # Keeping only results from 1970 because modern
 results = results[results['date'] > '1970-01-01'].reset_index(drop=True)
-
-# %%
-# we count every time a team has played at home and away
-# home_games_played = results['home_team'].value_counts()
-# away_games_played = results['away_team'].value_counts()
-
-# we each teams' total games played by combining home and away games played
-# games_played = pd.concat([home_games_played, away_games_played]).groupby(level=0).sum()
-
-# now we add it back into the results
-# results['home_team_games_played'] = results['home_team'].apply(lambda t: games_played[t])
-# results['away_team_games_played'] = results['away_team'].apply(lambda t: games_played[t])
-
-# keep only teams with 200 games played in past 45 years (5 games/year)
-# and fricking Curaçao has only player 215 since 1970
-# results = results[
-    # (results['home_team_games_played'] > 200) &
-    # (results['away_team_games_played'] > 20)
-# ].reset_index(drop=True)
 
 # %% [markdown]
 # ## Our first new stat: Importance
@@ -1013,10 +994,11 @@ def calculate_new_asi(match, t1=None, t2=None):
         dwi1 = dwi[team1]
         dwi2 = dwi[team2]
     else:
-        as1 = t1.asi
-        as2 = t2.asi
-        as1 = t1.dwi
-        as2 = t2.dwi
+        asi1 = t1.asi
+        asi2 = t2.asi
+
+        dwi1 = t1.dwi
+        dwi2 = t2.dwi
 
     g1 = match['home_score']
     g2 = match['away_score']
@@ -1046,10 +1028,11 @@ def calculate_new_dwi(match, t1=None, t2=None):
         dwi1 = dwi[team1]
         dwi2 = dwi[team2]
     else:
-        as1 = t1.asi
-        as2 = t2.asi
-        as1 = t1.dwi
-        as2 = t2.dwi
+        asi1 = t1.asi
+        asi2 = t2.asi
+
+        dwi1 = t1.dwi
+        dwi2 = t2.dwi
 
     g1 = match['home_score']
     g2 = match['away_score']
@@ -1148,10 +1131,6 @@ for team in reference.wc_teams:
     reference.teams[team].dwi = dwi[team]
     reference.teams[team].form = form[team]
 
-# %%
-# relevant_results = results[results.index > all_teams_5_games_index].reset_index(drop=True)
-# relevant_results
-
 # %% [markdown]
 # # Now we create our dataset
 # ## We'll train a machine-learning model on it
@@ -1159,7 +1138,7 @@ for team in reference.wc_teams:
 
 # %%
 entries = []
-for i, row in tqdm(results.iterrows(), total=relevant_results.shape[0], desc='Creating training data'):
+for i, row in tqdm(results.iterrows(), total=results.shape[0], desc='Creating training data'):
     date = row['date']
     team1 = row['home_team']
     team2 = row['away_team']
@@ -1568,7 +1547,7 @@ def analyze_pxgbr(data, goals, dates, window_length=2000):
 
     return lambdas, importances
 
-def plot_feature_importance_trends(names, feature_dicts, eatures):
+def plot_feature_importance_trends(names, feature_dicts, features):
     # Build a list of values per feature
     feature_values = {f: [] for f in features}
     for fd in feature_dicts:
@@ -1611,8 +1590,8 @@ def plot_feature_importance_trends(names, feature_dicts, eatures):
 
 # %%
 maher_features = ['team_asi', 'opponent_dwi', 'venue']
-most_features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance']#, 'venue']
-all_features = ['team_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance']#, 'venue']
+most_features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance', 'venue']
+all_features = ['team_rating', 'team_asi', 'opponent_dwi', 'team_form', 'opponent_form', 'importance', 'venue']
 
 summaries = Object()
 
@@ -1701,7 +1680,7 @@ plt.show()
 # %%
 class XGBR_Poisson(Model):
     pxgbr = None
-    features = ['team_rating', 'team_asi', 'opponent_dwi', 'importance', 'team_form', 'opponent_form']
+    features = all_features
     def __init__(self):
         self.xg_model = deepcopy(XGBR_Poisson.pxgbr)
 
@@ -1710,20 +1689,20 @@ class XGBR_Poisson(Model):
             'team_rating': match.home.rating,
             'team_asi': match.home.asi,
             'opponent_dwi': match.away.dwi,
-            'importance': 1,
             'team_form': eval_form(match.home.form),
             'opponent_form': eval_form(match.away.form),
-            # 'venue': 0.5, # not taking into account usa,mex,can
+            'importance': 1,
+            'venue': 0.5, # not taking into account usa,mex,can
         }
 
         away_reatures = {
             'team_rating': match.away.rating,
             'team_asi': match.away.asi,
             'opponent_dwi': match.home.dwi,
-            'importance': 1,
             'team_form': eval_form(match.away.form),
             'opponent_form': eval_form(match.home.form),
-#            'venue': 0.5, # not taking into account usa,mex,can
+            'importance': 1,
+            'venue': 0.5, # not taking into account usa,mex,can
         }
 
         return home_reatures, away_reatures
@@ -1756,8 +1735,10 @@ class XGBR_Poisson(Model):
             'home_dwi': match.home.dwi,
             'away_form': match.away.form,
             'home_form': match.home.form,
+            'away_score': match.away_score,
+            'home_score': match.home_score,
             'importance': 1,
-        }])
+        }]).iloc[0]
         match.home.rating, match.away.rating = calculate_new_rating(match_df, match.home, match.away)
         match.home.asi, match.away.asi = calculate_new_asi(match_df, match.home, match.away)
         match.home.dwi, match.away.dwi = calculate_new_dwi(match_df, match.home, match.away)
